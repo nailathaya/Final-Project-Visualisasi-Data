@@ -6,3 +6,4 @@ shapely
 pyproj
 fiona
 plotly
+statsmodels
