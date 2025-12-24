@@ -1,346 +1,276 @@
-# app.py
 import streamlit as st
 import pandas as pd
 import geopandas as gpd
-import numpy as np
-import folium
-from streamlit_folium import st_folium
-import json
 import plotly.express as px
-from shapely.geometry import mapping
+import plotly.graph_objects as go
+import json
 
-# -------------------------------
-# CONFIG
-# -------------------------------
-BASE = "/content/drive/MyDrive/Data Visualisation Competition 2025" 
-PATH_LEVEL1 = f"{BASE}/data/level_1/Level_1.xlsx"
-PATH_LEVEL3 = f"{BASE}/data/level_3/Level_3.xlsx"
-PATH_LOOKUPS = f"{BASE}/lookups/lookups.xlsx"
-PATH_SHAPE = f"{BASE}/shapefile/small_areas_british_grid.shp"
+st.set_page_config(
+    page_title="Dashboard Aksi Iklim 2025-2050",
+    page_icon="🌍",
+    layout="wide",
+    initial_sidebar_state="collapsed"
+)
 
-st.set_page_config(layout="wide", page_title="Co-Benefits Visualisation", initial_sidebar_state="expanded")
+st.markdown("""
+    <style>
+        .block-container {
+            padding-top: 1rem;
+            padding-bottom: 1rem;
+            padding-left: 2rem;
+            padding-right: 2rem;
+            max-width: 100%;
+        }
+        h1 { font-family: 'Helvetica Neue', sans-serif; font-size: 2.2rem; margin-bottom: 0; color: #003366; }
+        h2 { font-family: 'Helvetica Neue', sans-serif; font-size: 1.5rem; margin-top: 0; color: #2E86AB; }
+        h3 { font-size: 1.1rem; color: #444; margin-bottom: 5px; }
+        p, div { font-family: 'Segoe UI', sans-serif; font-size: 0.9rem; }
+        #MainMenu {visibility: hidden;}
+        footer {visibility: hidden;}
+        header {visibility: hidden;}
+    </style>
+""", unsafe_allow_html=True)
 
-# -------------------------------
-# UTIL: load & cache data
-# -------------------------------
 @st.cache_data
-def load_level1(path=PATH_LEVEL1):
-    return pd.read_excel(path)
+def load_data():
+    base_path = "/Users/HilalAbyan/Final-Project-Visualisasi-Data/Data Visualisation Competition 2025/"
+    path_level1 = f"{base_path}/data/level_1/Level_1.parquet"
+    path_level3 = f"{base_path}/data/level_3/level3_road_cong.parquet"
+    path_lookups = f"{base_path}/lookups/lookups.parquet"
+    path_shape = f"{base_path}shapefile/small_areas_british_grid.parquet"
+    
+    l1 = pd.read_parquet(path_level1)
+    l3 = pd.read_parquet(path_level3)
+    look = pd.read_parquet(path_lookups)
+    gdf = gpd.read_parquet(path_shape)
+    
+    return l1, l3, look, gdf
 
-@st.cache_data
-def load_level3(path=PATH_LEVEL3):
-    return pd.read_excel(path)
+try:
+    level_1, df, look, gdf = load_data()
+    years = [str(y) for y in range(2025, 2051)]
+except Exception as e:
+    st.error(f"Gagal memuat data. Pastikan path file benar. Error: {e}")
+    st.stop()
 
-@st.cache_data
-def load_lookups(path=PATH_LOOKUPS):
-    return pd.read_excel(path)
+for y in years:
+    if y in df.columns:
+        df[y] = pd.to_numeric(df[y], errors='coerce').fillna(0)
 
-@st.cache_data
-def load_shapefile(path=PATH_SHAPE):
-    return gpd.read_file(path)
+cong_series = df[df['co-benefit_type'] == 'congestion'][years].sum()
+safe_series = df[df['co-benefit_type'] == 'road_safety'][years].sum()
 
-# Safe year columns detection (int or numeric-strings)
-def detect_year_cols(df, start=2025, end=2050):
-    cols = []
-    for c in df.columns:
-        try:
-            if isinstance(c, int):
-                y = c
-            else:
-                s = str(c).strip()
-                if s.isdigit():
-                    y = int(s)
-                else:
-                    continue
-            if start <= y <= end:
-                cols.append(c)
-        except Exception:
-            continue
-    # sort by numeric year value
-    cols_sorted = sorted(cols, key=lambda x: int(str(x)))
-    return cols_sorted
+df_line = pd.DataFrame({
+    'Year': years,
+    'Congestion': cong_series.values,
+    'Road Safety': safe_series.values
+})
+df_line['Cumulative_Congestion'] = df_line['Congestion'].cumsum()
+df_line['Cumulative_Safety'] = df_line['Road Safety'].cumsum()
 
-# -------------------------------
-# LOAD
-# -------------------------------
-st.sidebar.title("Data & Settings")
-st.sidebar.write("Memuat data — tunggu sebentar...")
+totals = df.groupby('co-benefit_type')['sum'].sum().abs()
+total_cong = totals['congestion']
+total_safe = totals['road_safety']
 
-level_1 = load_level1()
-level_3 = load_level3()
-lookups = load_lookups()
-gdf = load_shapefile()
+mortality_data = df[df['damage_pathway'] == 'reduced_mortality'][years].sum()
 
-st.sidebar.success("Data loaded")
+df['total_value'] = df[years].sum(axis=1)
+grouped_area = df.groupby(['small_area', 'co-benefit_type'])['total_value'].sum().unstack().reset_index()
+if 'congestion' not in grouped_area.columns: grouped_area['congestion'] = 0
+if 'road_safety' not in grouped_area.columns: grouped_area['road_safety'] = 0
 
-# -------------------------------
-# SIDEBAR CONTROLS
-# -------------------------------
-st.sidebar.header("Visual settings")
-map_mode = st.sidebar.selectbox("Map mode", ["Total (level_1)", "Per year (level_3)"])
-year_cols = detect_year_cols(level_3)
-selected_year = None
-if map_mode == "Per year (level_3)":
-    if year_cols:
-        # convert to int labels for slider
-        years_int = [int(str(y)) for y in year_cols]
-        selected_year = st.sidebar.select_slider("Select year for map", options=years_int, value=years_int[0])
-    else:
-        st.sidebar.error("No year columns detected in level_3")
+df['sum'] = pd.to_numeric(df['sum'], errors='coerce')
+pathways_data = df.groupby(['damage_pathway', 'damage_type'])['sum'].sum().abs().reset_index()
+pathways_data.columns = ['Damage Pathway', 'Type', 'Total Value']
 
-show_pop_bubbles = st.sidebar.checkbox("Show population bubbles (map)", value=True)
-bubble_max_radius = st.sidebar.slider("Bubble max radius", min_value=1, max_value=50, value=8)
+pathway_labels = {
+    'time_saved': 'Time Saved',
+    'reduced_mortality': 'Reduced Mortality',
+    'society': 'Society'
+}
+pathways_data['Pathway Label'] = pathways_data['Damage Pathway'].map(pathway_labels)
 
-# scatter settings
-st.sidebar.markdown("---")
-st.sidebar.write("Scatter settings")
-region_col = st.sidebar.selectbox("Region column for coloring (lookups)", options=["local_authority", "nation"], index=0)
+agg_l3 = df.groupby('small_area')['total_value'].sum().reset_index()
+map_df = gdf.merge(agg_l3, on='small_area', how='left')
 
-# line chart settings
-st.sidebar.markdown("---")
-st.sidebar.write("Line chart settings")
-line_smooth = st.sidebar.checkbox("Apply 3-yr rolling mean (line chart)", value=False)
+c_head1, c_head2 = st.columns([3, 1])
+with c_head1:
+    st.markdown("<h1>AKSI IKLIM: Dampak Multidimensional terhadap Efisiensi Waktu dan Keselamatan Jiwa</h1>", unsafe_allow_html=True)
+    st.markdown("**Intervensi transportasi berkelanjutan merupakan bentuk investasi sosial-ekonomi jangka panjang.** Dashboard ini menyajikan analisis dampak kebijakan kota hijau terhadap peningkatan efisiensi sistem transportasi dan keselamatan masyarakat pada periode 2025–2050.")
 
-# -------------------------------
-# PREPARE DATA
-# -------------------------------
-# prepare choropleth base (level_1)
-level_1_copy = level_1.copy()
-if 'road_safety' in level_1_copy.columns and 'congestion' in level_1_copy.columns:
-    level_1_copy['total_benefit'] = level_1_copy['road_safety'] + level_1_copy['congestion']
-else:
-    level_1_copy['total_benefit'] = level_1_copy.get('sum', 0)  # fallback
+with c_head2:
+    st.markdown("""
+    <div style="text-align: right; color: gray;">
+        <b>Dashboard Pemantauan Dampak Kebijakan</b><br>
+        Fokus Analisis: Efisiensi Sistem dan Keselamatan Publik<br>
+        <i>Pembaruan Terakhir: Desember 2024</i>
+    </div>
+    """, unsafe_allow_html=True)
 
-# Merge shapefile with level_1 data for mapping by default
-gdf_merged_base = gdf.merge(level_1_copy[['small_area', 'total_benefit', 'road_safety', 'congestion']],
-                            on='small_area', how='left')
+st.markdown("---")
 
-# Prepare lookup merge for scatter
-lookups_small = lookups.copy()
-# ensure population numeric
-if 'population' in lookups_small.columns:
-    lookups_small['population'] = pd.to_numeric(lookups_small['population'], errors='coerce')
-else:
-    lookups_small['population'] = np.nan
+left_panel, right_panel = st.columns([3, 1.3])
 
-scatter_df = level_1_copy[['small_area', 'road_safety', 'congestion']].merge(
-    lookups_small[['small_area', 'population', region_col]], on='small_area', how='left'
-).dropna(subset=['population'])
+with left_panel:
+    col1, col2 = st.columns([2, 1])
 
-# Prepare line chart aggregates from level_3
-year_columns = detect_year_cols(level_3)
-# Filter pathways
-cong_df = level_3[
-    (level_3['co-benefit_type'] == 'congestion') &
-    (level_3['damage_pathway'].str.lower() == 'time_saved')
-] if 'damage_pathway' in level_3.columns else level_3[level_3['co-benefit_type'] == 'congestion']
-
-rs_df = level_3[
-    (level_3['co-benefit_type'] == 'road_safety') &
-    (level_3['damage_pathway'].str.lower().isin(['reduced_mortality', 'society']))
-] if 'damage_pathway' in level_3.columns else level_3[level_3['co-benefit_type'] == 'road_safety']
-
-# if lowercase mismatch, attempt case-insensitive fallback
-if cong_df.shape[0] == 0 and 'damage_pathway' in level_3.columns:
-    cong_df = level_3[
-        (level_3['co-benefit_type'] == 'congestion') &
-        (level_3['damage_pathway'].str.lower().str.replace(" ", "_") == 'time_saved')
-    ]
-
-if rs_df.shape[0] == 0 and 'damage_pathway' in level_3.columns:
-    rs_df = level_3[
-        (level_3['co-benefit_type'] == 'road_safety') &
-        (level_3['damage_pathway'].str.lower().isin(['reduced_mortality', 'society']))
-    ]
-
-# Sum across small areas
-if year_columns:
-    cong_yearly = cong_df[year_columns].sum(numeric_only=True)
-    rs_yearly = rs_df[year_columns].sum(numeric_only=True)
-    # ensure ordering and convert index to ints for plotting
-    years_plot = [int(str(x)) for x in cong_yearly.index]
-else:
-    cong_yearly = pd.Series(dtype=float)
-    rs_yearly = pd.Series(dtype=float)
-    years_plot = []
-
-# -------------------------------
-# LAYOUT: Title + Columns
-# -------------------------------
-st.title("Co-Benefits Visualisation — Road Safety & Congestion")
-st.markdown("Interaktif: peta choropleth, scatter hubungan, dan tren 2025–2050. Sesuaikan di sidebar.")
-
-col1, col2 = st.columns([1, 1])
-
-# -------------------------------
-# MAP (LEFT)
-# -------------------------------
-with col1:
-    st.subheader("Choropleth Map — Where Climate Action Saves Time & Lives")
-
-    if map_mode == "Total (level_1)":
-        # Create folium map centered on UK
-        m = folium.Map(location=[54.0, -2.0], zoom_start=5, tiles="cartodbpositron")
-        # convert GeoDataFrame to GeoJSON
-        gjson = json.loads(gdf_merged_base.to_json())
-
-        # create choropleth
-        folium.Choropleth(
-            geo_data=gjson,
-            name="Total co-benefit",
-            data=gdf_merged_base,
-            columns=["small_area", "total_benefit"],
-            key_on="feature.properties.small_area",
-            fill_color="YlGnBu",
-            nan_fill_color="white",
-            fill_opacity=0.8,
-            line_opacity=0.1,
-            legend_name="Total benefit (road_safety + congestion)"
-        ).add_to(m)
-
-        # optional population bubbles
-        if show_pop_bubbles and 'population' in lookups_small.columns:
-            # attach centroids for bubbles (requires small areas to have valid geometry)
-            g_centroids = gdf_merged_base.copy()
-            # compute centroid coords
-            g_centroids['centroid_lon'] = g_centroids.geometry.centroid.x
-            g_centroids['centroid_lat'] = g_centroids.geometry.centroid.y
-            # merge population
-            g_centroids = g_centroids.merge(lookups_small[['small_area', 'population']], on='small_area', how='left')
-            # normalize population to radius
-            pop = g_centroids['population'].fillna(0)
-            if pop.max() > 0:
-                radii = (pop / pop.max()) * bubble_max_radius
-            else:
-                radii = pop
-            for _, row in g_centroids.dropna(subset=['centroid_lat', 'centroid_lon']).iterrows():
-                if row.get('population', 0) > 0:
-                    folium.CircleMarker(
-                        location=[row['centroid_lat'], row['centroid_lon']],
-                        radius=float(radii.loc[_]),
-                        color=None,
-                        fill=True,
-                        fill_color='crimson',
-                        fill_opacity=0.4,
-                        popup=f"{row['small_area']}<br>pop: {int(row['population'])}"
-                    ).add_to(m)
-
-        st_data = st_folium(m, width=700, height=700)
-
-    else:
-        # Per-year map: extract year column name as string/integer that matches level_3
-        if selected_year is None:
-            st.error("Year columns not detected in level_3 to build per-year map.")
-        else:
-            # selected_year is int; find corresponding column in level_3 (could be '2025' or 2025)
-            year_col_match = None
-            for c in year_columns:
-                if int(str(c)) == selected_year:
-                    year_col_match = c
-                    break
-            if year_col_match is None:
-                st.error("Selected year not found in data columns.")
-            else:
-                # aggregate level_3 to small_area total for that year (sum across pathways/co-benefits per small_area)
-                per_year = level_3.groupby('small_area', as_index=False)[[year_col_match]].sum(numeric_only=True)
-                per_year = per_year.rename(columns={year_col_match: 'value_year'})
-
-                gdf_year = gdf.merge(per_year, on='small_area', how='left')
-                m = folium.Map(location=[54.0, -2.0], zoom_start=5, tiles="cartodbpositron")
-                gjson = json.loads(gdf_year.to_json())
-
-                folium.Choropleth(
-                    geo_data=gjson,
-                    name=f"Value {selected_year}",
-                    data=gdf_year,
-                    columns=["small_area", "value_year"],
-                    key_on="feature.properties.small_area",
-                    fill_color="YlGnBu",
-                    nan_fill_color="white",
-                    fill_opacity=0.8,
-                    line_opacity=0.1,
-                    legend_name=f"Value in {selected_year}"
-                ).add_to(m)
-
-                if show_pop_bubbles and 'population' in lookups_small.columns:
-                    g_centroids = gdf_year.copy()
-                    g_centroids['centroid_lon'] = g_centroids.geometry.centroid.x
-                    g_centroids['centroid_lat'] = g_centroids.geometry.centroid.y
-                    g_centroids = g_centroids.merge(lookups_small[['small_area', 'population']], on='small_area', how='left')
-                    pop = g_centroids['population'].fillna(0)
-                    radii = (pop / pop.max()) * bubble_max_radius if pop.max() > 0 else pop
-                    for _, row in g_centroids.dropna(subset=['centroid_lat', 'centroid_lon']).iterrows():
-                        if row.get('population', 0) > 0:
-                            folium.CircleMarker(
-                                location=[row['centroid_lat'], row['centroid_lon']],
-                                radius=float(radii.loc[_]),
-                                color=None,
-                                fill=True,
-                                fill_color='crimson',
-                                fill_opacity=0.4,
-                                popup=f"{row['small_area']}<br>pop: {int(row['population'])}"
-                            ).add_to(m)
-
-                st_data = st_folium(m, width=700, height=700)
-
-# -------------------------------
-# SCATTER & LINE (RIGHT)
-# -------------------------------
-with col2:
-    st.subheader("Scatter: Safer Roads Come with Smoother Traffic")
-    st.markdown("X = congestion, Y = road_safety, bubble = population, color = region")
-
-    # interactive scatter via plotly
-    if scatter_df.shape[0] == 0:
-        st.warning("No scatter data available (missing population/lookup).")
-    else:
-        fig_scatter = px.scatter(
-            scatter_df,
-            x="congestion",
-            y="road_safety",
-            size="population",
-            color=region_col,
-            hover_name="small_area",
-            labels={"congestion": "Congestion benefit (million GBP)",
-                    "road_safety": "Road safety benefit (million GBP)"},
-            width=700,
-            height=450,
+    with col1:
+        st.markdown("### Manfaat Ekonomi Kumulatif Jangka Panjang")
+        fig_line = go.Figure()
+        fig_line.add_trace(go.Scatter(x=df_line['Year'], y=df_line['Cumulative_Congestion'], name='Penghematan Kemacetan',
+                                    line=dict(color='#2E86AB', width=3)))
+        fig_line.add_trace(go.Scatter(x=df_line['Year'], y=df_line['Cumulative_Safety'], name='Manfaat Keselamatan',
+                                    line=dict(color='#2ca02c', width=3)))
+        
+        fig_line.update_layout(
+            title="<b>Investasi Jangka Panjang dengan Manfaat Ekonomi Berkelanjutan</b>",
+            xaxis_title="Tahun", yaxis_title="Nilai Ekonomi Akumulatif (£)",
+            margin=dict(l=0, r=0, t=30, b=0), height=275,
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=-0.6,
+            ), template="plotly_white"
         )
-        fig_scatter.update_layout(legend=dict(title=region_col))
-        st.plotly_chart(fig_scatter, use_container_width=True)
-
-    st.markdown("---")
-    st.subheader("Line Chart: The Growing Benefits of Climate Action (2025–2050)")
-    st.markdown("Congestion = time_saved ; Road safety = reduced_mortality + society")
-
-    if len(years_plot) == 0:
-        st.warning("No year columns detected in level_3; cannot render line chart.")
-    else:
-        # build dataframe for plotly
-        df_line = pd.DataFrame({
-            "year": years_plot,
-            "congestion": [float(x) for x in cong_yearly.values],
-            "road_safety": [float(x) for x in rs_yearly.values]
-        })
-
-        if line_smooth:
-            df_line['congestion'] = df_line['congestion'].rolling(3, center=True, min_periods=1).mean()
-            df_line['road_safety'] = df_line['road_safety'].rolling(3, center=True, min_periods=1).mean()
-
-        fig_line = px.line(df_line, x="year", y=["congestion", "road_safety"],
-                           labels={"value": "Economic benefit (million GBP, NPV 2025)", "variable": "Co-benefit"},
-                           width=700, height=450)
-        fig_line.update_layout(legend_title_text="Co-benefit")
         st.plotly_chart(fig_line, use_container_width=True)
 
-# -------------------------------
-# FOOTER / NOTES
-# -------------------------------
+    with col2:
+        st.markdown("### Dominasi Efisiensi Waktu")
+        labels = ['Pengurangan Kemacetan', 'Peningkatan Keselamatan']
+        values = [total_cong, total_safe]
+        colors = ['#2E86AB', '#E94F37']
+        
+        fig_donut = go.Figure(data=[go.Pie(labels=labels, values=values, hole=.6, marker_colors=colors)])
+        fig_donut.update_layout(
+            title="<b>Proporsi Kontribusi Manfaat Ekonomi</b>",
+            margin=dict(l=20, r=20, t=30, b=0), height=250,
+            annotations=[dict(text='<b>Total <br>Manfaat</b>', x=0.5, y=0.5, font_size=14, showarrow=False)],
+            showlegend=True, legend=dict(orientation="h", y=-0.1)
+        )
+        st.plotly_chart(fig_donut, use_container_width=True)
+
+    col3, col4 = st.columns([1, 2])
+
+    with col3:
+        st.markdown("### Periode Manfaat")
+        key_years = ['2025', '2030', '2035', '2040']
+        key_vals = [mortality_data.get(y, 0) for y in key_years]
+        
+        max_val_pic = max(key_vals) if max(key_vals) > 0 else 1
+        norms = [int((v/max_val_pic)*8) for v in key_vals]
+        
+        fig_pic = go.Figure()
+        for i, (yr, val, n) in enumerate(zip(key_years, key_vals, norms)):
+            icons = "👤" * max(1, n)
+            fig_pic.add_trace(go.Bar(
+                y=[yr], x=[val], orientation='h',
+                text=f"{icons} {val:.1f} Jiwa", textposition='auto',
+                marker_color=['#a8ddb5', '#7bccc4', '#43a2ca', '#0868ac'][i]
+            ))
+        
+        fig_pic.update_layout(
+            title="<b>Periode Kritis (2025–2035)</b>",
+            xaxis_visible=False, yaxis=dict(title="Tahun", type='category'),
+            margin=dict(l=0, r=0, t=30, b=0), height=220, showlegend=False, template="plotly_white"
+        )
+        st.plotly_chart(fig_pic, use_container_width=True)
+
+    with col4:
+        st.markdown("### Tren Dampak Kebijakan terhadap Keselamatan Jiwa")
+        fig_mix = go.Figure()
+        fig_mix.add_trace(go.Bar(
+            x=years, y=mortality_data.values,
+            name='Nyawa Terselamatkan', marker_color='#E94F37', opacity=0.6
+        ))
+        fig_mix.add_trace(go.Scatter(
+            x=years, y=mortality_data.values,
+            name='Trend', line=dict(color='#c0392b', width=4, shape='spline')
+        ))
+        
+        peak_year = mortality_data.idxmax()
+        peak_val = mortality_data.max()
+
+        fig_mix.update_layout(
+            title=f"<b>Puncak Efektivitas Intervensi: Tahun {peak_year}</b>",
+            yaxis_title="Jumlah Jiwa / Tahun",
+            margin=dict(l=0, r=0, t=30, b=0), height=220, showlegend=False, template="plotly_white"
+        )
+        st.plotly_chart(fig_mix, use_container_width=True)
+
+    col5, col6 = st.columns(2)
+
+    with col5:
+        st.markdown("### Sinergi Manfaat")
+        fig_scat = px.scatter(grouped_area, x='road_safety', y='congestion', 
+                            labels={'road_safety': 'Safety Benefit (£)', 'congestion': 'Congestion Benefit (£)'},
+                            title="<b>Jalan Lancar Menghasilkan Jalan Aman</b>",
+                            trendline="ols", trendline_color_override="darkblue")
+        fig_scat.update_layout(margin=dict(l=0, r=0, t=30, b=0), height=200, template="plotly_white")
+        st.plotly_chart(fig_scat, use_container_width=True)
+
+    with col6:
+        st.markdown("### Rincian Jalur Dampak Kebijakan")
+        fig_polar = px.bar_polar(
+            pathways_data, 
+            r="Total Value", 
+            theta="Pathway Label", 
+            color="Type",
+            color_discrete_map={'health': '#E94F37', 'non-health': '#2E86AB', 'health benefits': '#E94F37'},
+            template="plotly_white",
+            title="<b>Sumber Keuntungan</b>"
+        )
+        
+        fig_polar.update_layout(
+            height=250,
+            margin=dict(l=30, r=30, t=30, b=0),
+            legend=dict(orientation="h", y=-0.2),
+            polar=dict(
+                radialaxis=dict(visible=True, showticklabels=False),
+                angularaxis=dict(direction="clockwise")
+            )
+        )
+        st.plotly_chart(fig_polar, use_container_width=True)
+
+with right_panel:
+    st.markdown("### Distribusi Geografis Dampak Kebijakan di Wilayah Britania Raya")
+    
+    if not map_df.empty:        
+        fig_map = px.choropleth_mapbox(
+            map_df,
+            geojson=map_df.geometry,
+            locations=map_df.index,
+            color='total_value',
+            color_continuous_scale='Bluered',
+            range_color=[map_df['total_value'].min(), map_df['total_value'].max()],
+            mapbox_style="carto-positron",
+            zoom=4.8, 
+            center={"lat": 54.0, "lon": -2.5},
+            opacity=0.7,
+            labels={'total_value': 'Benefit (£)'}
+        )
+        
+        fig_map.update_layout(
+            height=850, 
+            margin=dict(l=0, r=0, t=0, b=0),
+            coloraxis_showscale=True,
+            coloraxis_colorbar=dict(
+                title="Total Benefit",
+                title_font=dict(color="black", size=14),
+                tickfont=dict(color="black", size=12),
+                thicknessmode="pixels", thickness=15,
+                lenmode="fraction", len=0.7,
+                yanchor="top", y=1,
+                xanchor="left", x=0
+            )
+        )
+        st.plotly_chart(fig_map, use_container_width=True)
+    else:
+        st.info("Data spasial tidak tersedia.")
+
 st.markdown("---")
 st.markdown("""
-**Notes & Tips**
-- Jika peta kosong atau banyak NaN: periksa kesamaan kolom `small_area` antara shapefile dan file level_1/level_3.
-- Untuk per-year map, kolom tahun di `level_3` bisa bertipe string ('2025') atau integer (2025); aplikasi ini mendeteksi kedua format.
-- Anda dapat mematikan atau menyalakan layer bubble population di sidebar.
-- Ubah path `BASE` di bagian atas jika menjalankan di lingkungan berbeda.
-""")
+<div style="text-align: center; font-size: 0.9rem; color: #555;">
+    <b>Kesimpulan:</b> Penerapan kebijakan transportasi berkelanjutan berkontribusi signifikan terhadap peningkatan kualitas hidup masyarakat melalui efisiensi sistem dan perlindungan keselamatan jiwa. 
+    <br><i>Sumber Data: Analisis Proyeksi Transportasi Periode 2025–2050.</i>
+</div>
+""", unsafe_allow_html=True)
