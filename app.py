@@ -4,6 +4,9 @@ import geopandas as gpd
 import plotly.express as px
 import plotly.graph_objects as go
 import json
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent
 
 st.set_page_config(
     page_title="Dashboard Aksi Iklim 2025-2050",
@@ -33,11 +36,11 @@ st.markdown("""
 
 @st.cache_data
 def load_data():
-    base_path = "/Users/HilalAbyan/Final-Project-Visualisasi-Data/Data Visualisation Competition 2025/"
+    base_path = BASE_DIR / "Data Visualisation Competition 2025"
     path_level1 = f"{base_path}/data/level_1/Level_1.parquet"
     path_level3 = f"{base_path}/data/level_3/level3_road_cong.parquet"
     path_lookups = f"{base_path}/lookups/lookups.parquet"
-    path_shape = f"{base_path}shapefile/small_areas_british_grid.parquet"
+    path_shape = f"{base_path}/shapefile/small_areas_british_grid.parquet"
     
     l1 = pd.read_parquet(path_level1)
     l3 = pd.read_parquet(path_level3)
